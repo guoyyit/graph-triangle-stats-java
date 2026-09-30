@@ -4,10 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
- * @author Vincent
- * @version 1.0
+ * Verifies the Spring context boots with an isolated test WAL directory.
  */
-@SpringBootTest
+@SpringBootTest(properties = "graph.stats.wal-dir=target/test-wal/context")
 public class ApplicationTests {
     @Test
     public void contentLoad() {
