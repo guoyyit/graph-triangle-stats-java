@@ -10,8 +10,12 @@ import com.github.guoyyit.graphtrianglestatsjava.exception.UnknownVersionExcepti
 import com.github.guoyyit.graphtrianglestatsjava.service.GraphStatsService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -164,5 +168,51 @@ class GraphStatsServiceTest {
         GraphSnapshot continued = restarted.commit(List.of(add("a", "b")));
         assertEquals(beforeCrash.version() + 1, continued.version());
         assertEquals(4, continued.totalTriangles());
+    }
+
+    /**
+     * Full crash cycle at service level: a crash leaves a remnant of any
+     * length at the log tail; the next restart cleans it and recovers the
+     * pre-crash state exactly; batches committed afterwards continue the
+     * version sequence and survive a second restart; repeating recovery is
+     * idempotent.
+     */
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 32, 100})
+    void recoversExactlyThroughRemnantThenCommitThenRestart(int remnantLength,
+                                                            @TempDir Path walDir) throws Exception {
+        GraphStatsService first = newService(walDir);
+        first.commit(k4Edges());
+        first.commit(List.of(remove("a", "b")));
+        GraphSnapshot beforeCrash = first.current();
+        first.shutdown();
+
+        Path logFile = walDir.resolve("wal.log");
+        byte[] remnant = new byte[remnantLength];
+        for (int index = 0; index < remnant.length; index++) {
+            remnant[index] = (byte) (0x5A + index);
+        }
+        Files.write(logFile, remnant, StandardOpenOption.APPEND);
+
+        GraphStatsService restarted = newService(walDir);
+        assertEquals(beforeCrash, restarted.current(),
+                "restart after " + remnantLength + "-byte remnant must restore the pre-crash snapshot");
+
+        GraphSnapshot continued = restarted.commit(List.of(add("a", "b")));
+        assertEquals(beforeCrash.version() + 1, continued.version(),
+                "version must continue from the recovered version");
+        assertEquals(4, continued.totalTriangles());
+        restarted.shutdown();
+
+        GraphStatsService restartedAgain = newService(walDir);
+        assertEquals(continued, restartedAgain.current(),
+                "batches committed after remnant cleanup must survive the next restart");
+        assertEquals(4, restartedAgain.current().totalTriangles());
+
+        GraphStatsService recoveredOnceMore = newService(walDir);
+        assertEquals(continued, recoveredOnceMore.current(),
+                "repeating recovery on the same log must not re-apply or lose events");
+        recoveredOnceMore.shutdown();
+        restartedAgain.shutdown();
     }
 }

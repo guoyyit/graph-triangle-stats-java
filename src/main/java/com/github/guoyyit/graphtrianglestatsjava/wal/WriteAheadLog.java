@@ -33,6 +33,13 @@ public final class WriteAheadLog implements AutoCloseable {
     private static final int OP_ADD = 0;
     private static final int OP_REMOVE = 1;
 
+    /**
+     * Smallest legitimate payload: {@code [long version][int eventCount]} with
+     * zero events. Anything shorter can never be a committed batch, so a frame
+     * header declaring it is torn or garbage (e.g. a zero-filled remnant).
+     */
+    private static final int MIN_PAYLOAD_LENGTH = Long.BYTES + Integer.BYTES;
+
     private final Path logFile;
     private final FileOutputStream output;
 
@@ -49,49 +56,41 @@ public final class WriteAheadLog implements AutoCloseable {
     /**
      * Truncates any torn trailing frames left by a crash mid-write, so stale
      * uncommitted bytes cannot precede later valid commits.
+     *
+     * <p>The scan is bounded by the file size, not by read exceptions, so a
+     * trailing remnant of ANY length (from a single byte up to a partially
+     * written frame) is detected and removed exactly the same way: the file is
+     * truncated back to the end of the last complete, checksum-valid record.
+     * Running it again on an already clean file is a no-op.
      */
     public static void truncateAfterLastValidRecord(Path directory) {
         Path file = directory.resolve("wal.log");
         if (!Files.isReadable(file)) {
             return;
         }
-        long validLength = 0;
-        try (DataInputStream input = new DataInputStream(
-                new BufferedInputStream(Files.newInputStream(file)))) {
-            while (true) {
-                int length;
-                try {
-                    length = input.readInt();
-                } catch (EOFException cleanEnd) {
-                    return;
-                } catch (IOException end) {
-                    break;
-                }
-                if (length < 0 || length > 1 << 28) {
-                    break;
-                }
-                int expectedCrc;
-                byte[] payload;
-                try {
-                    expectedCrc = input.readInt();
-                    payload = new byte[length];
-                    input.readFully(payload);
-                } catch (EOFException torn) {
-                    break;
-                }
-                CRC32 crc = new CRC32();
-                crc.update(payload);
-                if ((int) crc.getValue() != expectedCrc) {
-                    break;
-                }
-                validLength += 8L + length;
-            }
-        } catch (IOException exception) {
-            throw new UncheckedIOException("failed to scan write-ahead log", exception);
-        }
         try {
-            long currentSize = Files.size(file);
-            if (currentSize > validLength) {
+            long fileSize = Files.size(file);
+            long validLength = 0;
+            try (DataInputStream input = new DataInputStream(
+                    new BufferedInputStream(Files.newInputStream(file)))) {
+                while (fileSize - validLength >= 8) {
+                    int length = input.readInt();
+                    int expectedCrc = input.readInt();
+                    if (length < MIN_PAYLOAD_LENGTH || length > 1 << 28
+                            || length > fileSize - validLength - 8) {
+                        break;
+                    }
+                    byte[] payload = new byte[length];
+                    input.readFully(payload);
+                    CRC32 crc = new CRC32();
+                    crc.update(payload);
+                    if ((int) crc.getValue() != expectedCrc) {
+                        break;
+                    }
+                    validLength += 8L + length;
+                }
+            }
+            if (fileSize > validLength) {
                 try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
                         file, StandardOpenOption.WRITE)) {
                     channel.truncate(validLength);
@@ -153,7 +152,7 @@ public final class WriteAheadLog implements AutoCloseable {
                 } catch (IOException end) {
                     break;
                 }
-                if (length < 0 || length > 1 << 28) {
+                if (length < MIN_PAYLOAD_LENGTH || length > 1 << 28) {
                     break;
                 }
                 int expectedCrc;
