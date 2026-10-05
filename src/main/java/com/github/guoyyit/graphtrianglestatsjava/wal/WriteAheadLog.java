@@ -49,6 +49,12 @@ public final class WriteAheadLog implements AutoCloseable {
     /**
      * Truncates any torn trailing frames left by a crash mid-write, so stale
      * uncommitted bytes cannot precede later valid commits.
+     *
+     * <p>A tail of any length is treated as residue: fewer than 4 remaining
+     * bytes cannot even hold a frame length header, so an EOF raised by
+     * {@code readInt} means either a clean end (file size already equals the
+     * scanned valid length, truncation becomes a no-op) or a torn header of
+     * 1-3 bytes that must be truncated exactly like longer residue.
      */
     public static void truncateAfterLastValidRecord(Path directory) {
         Path file = directory.resolve("wal.log");
@@ -62,8 +68,8 @@ public final class WriteAheadLog implements AutoCloseable {
                 int length;
                 try {
                     length = input.readInt();
-                } catch (EOFException cleanEnd) {
-                    return;
+                } catch (EOFException endOrTornHeader) {
+                    break;
                 } catch (IOException end) {
                     break;
                 }
@@ -95,6 +101,7 @@ public final class WriteAheadLog implements AutoCloseable {
                 try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
                         file, StandardOpenOption.WRITE)) {
                     channel.truncate(validLength);
+                    channel.force(true);
                 }
             }
         } catch (IOException exception) {

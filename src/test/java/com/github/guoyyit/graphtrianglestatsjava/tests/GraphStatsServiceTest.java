@@ -10,8 +10,12 @@ import com.github.guoyyit.graphtrianglestatsjava.exception.UnknownVersionExcepti
 import com.github.guoyyit.graphtrianglestatsjava.service.GraphStatsService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -164,5 +168,59 @@ class GraphStatsServiceTest {
         GraphSnapshot continued = restarted.commit(List.of(add("a", "b")));
         assertEquals(beforeCrash.version() + 1, continued.version());
         assertEquals(4, continued.totalTriangles());
+    }
+
+    @ParameterizedTest(name = "crash-recovery cycle with torn tail of {0} byte(s)")
+    @ValueSource(ints = {1, 2, 3, 4, 5, 7, 8, 16, 33})
+    void crashRecoveryCycleWithTornTailOfAnyLength(int residueLength,
+                                                   @TempDir Path walDir) throws Exception {
+        GraphStatsService first = newService(walDir);
+        first.commit(k4Edges());
+        first.commit(List.of(remove("a", "b")));
+        GraphSnapshot beforeFirstCrash = first.current();
+        first.shutdown();
+        appendResidue(walDir, residueLength);
+
+        GraphStatsService second = newService(walDir);
+        assertSnapshotEquals(beforeFirstCrash, second.current(),
+                "restart after torn tail of " + residueLength + " byte(s)");
+
+        GraphSnapshot continued = second.commit(List.of(add("a", "b"), add("e", "f")));
+        assertEquals(beforeFirstCrash.version() + 1, continued.version(),
+                "version must continue from the recovered version");
+        second.shutdown();
+        appendResidue(walDir, residueLength + 1);
+
+        GraphStatsService third = newService(walDir);
+        assertSnapshotEquals(continued, third.current(),
+                "batch committed after residue cleanup must survive the next crash");
+        third.shutdown();
+
+        GraphStatsService fourth = newService(walDir);
+        assertSnapshotEquals(continued, fourth.current(),
+                "repeated recovery over the same log must be idempotent");
+        fourth.shutdown();
+    }
+
+    private static void appendResidue(Path walDir, int residueLength) throws Exception {
+        byte[] residue = new byte[residueLength];
+        for (int index = 0; index < residue.length; index++) {
+            residue[index] = (byte) (0xA5 + index);
+        }
+        Files.write(walDir.resolve("wal.log"), residue, StandardOpenOption.APPEND);
+    }
+
+    private static void assertSnapshotEquals(GraphSnapshot expected, GraphSnapshot actual,
+                                             String scenario) {
+        assertEquals(expected.version(), actual.version(), scenario + ": version");
+        assertEquals(expected.totalTriangles(), actual.totalTriangles(),
+                scenario + ": totalTriangles");
+        assertEquals(expected.totalWedges(), actual.totalWedges(), scenario + ": totalWedges");
+        assertEquals(expected.vertexTriangles(), actual.vertexTriangles(),
+                scenario + ": vertexTriangles");
+        assertEquals(expected.edgeTriangles(), actual.edgeTriangles(), scenario + ": edgeTriangles");
+        assertEquals(expected.degrees(), actual.degrees(), scenario + ": degrees");
+        assertEquals(expected.localClustering(), actual.localClustering(),
+                scenario + ": localClustering");
     }
 }
